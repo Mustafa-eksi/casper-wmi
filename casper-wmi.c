@@ -52,12 +52,24 @@ static acpi_status casper_perform_wmi(void) {
 static ssize_t zone_colors_show(struct device *dev, struct device_attribute *attr,
 			        char *buf)
 {
-	//int value = hp_wmi_read_int(HPWMI_DISPLAY_QUERY);
-
-	//if (value < 0)
-	//	return value;
-	return 0;
-	
+	printk("zone_colors_show\n");
+	int count = sprintf(buf, "zone 0: #%02x%02x%02x%02x\nzone 1: #%02x%02x%02x%02x\nzone 2: #%02x%02x%02x%02x\nzone 3: #%02x%02x%02x%02x\n",
+		casper_wmi_data[0].r, casper_wmi_data[0].g,
+		casper_wmi_data[0].b, casper_wmi_data[0].a,
+		
+		casper_wmi_data[1].r, casper_wmi_data[1].g,
+		casper_wmi_data[1].b, casper_wmi_data[1].a,
+		
+		casper_wmi_data[2].r, casper_wmi_data[2].g,
+		casper_wmi_data[2].b, casper_wmi_data[2].a,
+		
+		casper_wmi_data[3].r, casper_wmi_data[3].g,
+		casper_wmi_data[3].b, casper_wmi_data[3].a
+	);
+	printk("%d\n", count);
+	//char *hello = "hello";
+	//strncpy(buf, hello, strlen(hello));
+	return count;
 }
 
 static ssize_t zone_colors_store(struct device *dev, struct device_attribute *attr,
@@ -67,17 +79,37 @@ static ssize_t zone_colors_store(struct device *dev, struct device_attribute *at
 	int ret;
 	
 	ret = kstrtou64(buf, 16, &tmp);
-	// 0x 12 34 56 - 78 90 ab cd ef
+	if(ret)
+		return ret;
+	
 	u8 zone = (tmp>>(8*4))&0xFF;
-	if(zone > 3) {
+	if(zone > 4) {
 		printk("Zone doesn't exist\n");
 		return 1;
 	}
-	casper_wmi_data[zone].a = (u8) tmp&0xFF;
-	casper_wmi_data[zone].r = (u8) (tmp>>(8*3))&0xFF;
-	casper_wmi_data[zone].g = (u8) (tmp>>(8*2))&0xFF;
-	casper_wmi_data[zone].b = (u8) (tmp>>8)&0xFF;
-	casper_set_single_zone(zone);
+	if(zone == 4) {
+		// apply for all zones on keyboard
+		for(size_t i = 1; i<=3; i++) {
+			casper_wmi_data[i].a = (u8) tmp&0xFF;
+			casper_wmi_data[i].r = (u8) (tmp>>(8*3))&0xFF;
+			casper_wmi_data[i].g = (u8) (tmp>>(8*2))&0xFF;
+			casper_wmi_data[i].b = (u8) (tmp>>8)&0xFF;
+		}
+		ret = casper_perform_wmi();
+		if(ret != 0) {
+			printk("ACPI status: %d\n", ret);
+		}
+	}else {
+		casper_wmi_data[zone].a = (u8) tmp&0xFF;
+		casper_wmi_data[zone].r = (u8) (tmp>>(8*3))&0xFF;
+		casper_wmi_data[zone].g = (u8) (tmp>>(8*2))&0xFF;
+		casper_wmi_data[zone].b = (u8) (tmp>>8)&0xFF;
+		ret = casper_set_single_zone(zone);
+		if(ret != 0) {
+			printk("ACPI status: %d\n", ret);
+		}
+	}	
+	
 	//printk("tmp: zone: %0x, r: %0x, g: %0x, b: %0x, a: %0x\n", (u8)(tmp>>(8*4))&0xFF, (u8) (tmp>>(8*3))&0xFF, (u8) (tmp>>(8*2))&0xFF, (u8) (tmp>>(8))&0xFF, (u8) tmp&0xFF);
 	return count;
 }
@@ -110,7 +142,7 @@ void set_casper_backlight_brightness(struct led_classdev *led_cdev,
 
 enum led_brightness get_casper_backlight_brightness(struct led_classdev *led_cdev)
 {
-	return 1;
+	return (enum led_brightness) casper_wmi_data[3].a;
 }
 
 static struct led_classdev casper_kbd_led = {
