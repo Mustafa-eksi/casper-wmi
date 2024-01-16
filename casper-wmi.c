@@ -5,84 +5,71 @@
 #include <linux/wmi.h>
 #include <linux/device.h>
 #include <linux/dev_printk.h>
-	
+
+MODULE_AUTHOR("Mustafa Ekşi <mustafa.eskieksi@gmail.com>");
+MODULE_DESCRIPTION("Casper Excalibur Laptop keyboard backlight driver");
+MODULE_LICENSE("GPL");
+
 #define CASPER_EXCALIBUR_WMI_GUID "644C5791-B7B0-4123-A90B-E93876E0DAAD"
 
-struct casper_zone_data {
-	u8 r, g, b, a;
+#define CASPER_KEYBOARD_LED_1 0x03
+#define CASPER_KEYBOARD_LED_2 0x04
+#define CASPER_KEYBOARD_LED_3 0x05
+#define CASPER_ALL_KEYBOARD_LEDS 0x06
+#define CASPER_CORNER_LEDS 0x07
+
+// Found these values with reverse engineering, other values are possible
+// but I don't know what they do.
+#define CASPER_LED_A0 0xfb00
+#define CASPER_LED_A1 0x0100
+
+struct casper_wmi_args {
+	u16 a0, a1;
+	u32 a2, a3;
 };
 
-struct casper_zone_data casper_wmi_data[4] = {0};
+// MARRGGBB
+// M: Mode, 0 and 1 is normal, up to 6 (2: blinking, 3: fade-out fade-in,
+// 					4: heartbeat, 5: repeat, 6: random)
+// A: alpha, R: red, G: green, B: blue
+u32 casper_led_data[4] = {0};
 
-static acpi_status casper_set_single_zone(size_t zone_id) {
-	char magical_input[32] = {
-		0x00,0xfb,0x00,0x01,
-		zone_id == 0 ? 0x07 : zone_id+2, // Zone
-		0x00,0x00,0x00,
-		casper_wmi_data[zone_id].b, // Blue
-		casper_wmi_data[zone_id].g, // Green
-		casper_wmi_data[zone_id].r, // Red
-		casper_wmi_data[zone_id].a, // Alpha
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+/*
+ * Function to set led value of specified zone, zone id should be between 3 and 7.
+ * */
+static acpi_status casper_set_backlight(u8 zone_id, u32 data) {
+	struct casper_wmi_args wmi_args = {0};
+	wmi_args.a0 = CASPER_LED_A0;
+	wmi_args.a1 = CASPER_LED_A1;
+	wmi_args.a2 = zone_id;
+	wmi_args.a3 = data;
+	
+	struct acpi_buffer input = {
+		(acpi_size)sizeof(struct casper_wmi_args), 
+		&wmi_args
 	};
-	struct acpi_buffer input = {(acpi_size)sizeof(char)*32, &magical_input};
 	return wmi_set_block(CASPER_EXCALIBUR_WMI_GUID, 0,
 					&input);
 }
 
-static acpi_status casper_send_zones(void) {
-	for(size_t i = 0; i<4; i++) {
-		acpi_status ret = casper_set_single_zone(i);
-		if(ret != 0)
-			return ret;
-	}
-	return 0;
-}
-
-static acpi_status casper_set_all_keyboard(u8 r, u8 g, u8 b, u8 a) {
-	casper_wmi_data[1].r = r;
-	casper_wmi_data[1].g = g;
-	casper_wmi_data[1].b = b;
-	casper_wmi_data[1].a = a;
-	casper_wmi_data[2] = casper_wmi_data[1];
-	casper_wmi_data[3] = casper_wmi_data[1];
-	char magical_input[32] = {
-		0x00,0xfb,0x00,0x01,
-		0x06, // Zone
-		0x00,0x00,0x00,
-		b, // Blue
-		g, // Green
-		r, // Red
-		a, // Alpha
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
-	};
-	struct acpi_buffer input = {(acpi_size)sizeof(char)*32, &magical_input};
-	return wmi_set_block(CASPER_EXCALIBUR_WMI_GUID, 0,
-					&input);
-}
-
-static ssize_t zone_colors_show(struct device *dev, struct device_attribute *attr,
-			        char *buf)
+static ssize_t led_control_show(struct device *dev, struct device_attribute 
+				*attr, char *buf)
 {
-	return sprintf(buf, "zone 0: #%02x%02x%02x%02x\nzone 1: #%02x%02x%02x%02x\nzone 2: #%02x%02x%02x%02x\nzone 3: #%02x%02x%02x%02x\n",
-		casper_wmi_data[0].r, casper_wmi_data[0].g,
-		casper_wmi_data[0].b, casper_wmi_data[0].a,
-		
-		casper_wmi_data[1].r, casper_wmi_data[1].g,
-		casper_wmi_data[1].b, casper_wmi_data[1].a,
-		
-		casper_wmi_data[2].r, casper_wmi_data[2].g,
-		casper_wmi_data[2].b, casper_wmi_data[2].a,
-		
-		casper_wmi_data[3].r, casper_wmi_data[3].g,
-		casper_wmi_data[3].b, casper_wmi_data[3].a
+	return sprintf(buf, 
+"led 0: #%08x\n\
+led 1: #%08x\n\
+led 2: #%08x\n\
+corner leds: #%08x\n",
+		casper_led_data[0], casper_led_data[1], casper_led_data[2],
+		casper_led_data[3]
 	);
 }
 
-static ssize_t zone_colors_store(struct device *dev, struct device_attribute *attr,
-			 const char *buf, size_t count)
+/*
+ * input should start with zone id and then u32 led data (same as casper_led_data).
+ * */
+static ssize_t led_control_store(struct device *dev, struct device_attribute
+					*attr, const char *buf, size_t count)
 {
 	u64 tmp;
 	int ret;
@@ -91,75 +78,79 @@ static ssize_t zone_colors_store(struct device *dev, struct device_attribute *at
 	if(ret)
 		return ret;
 	
-	u8 zone = (tmp>>(8*4))&0xFF;
-	if(zone > 4) {
-		dev_err(dev, "zone_colors_store: this zone doesn't exist\n");
+	u8 led_zone = (tmp>>(8*4))&0xFF;
+	if( CASPER_KEYBOARD_LED_1 > led_zone || led_zone > CASPER_CORNER_LEDS) {
+		dev_err(dev, "led_control_store: this led zone doesn't exist\n");
 		return -1;
 	}
-	printk("ret a: %0x\n",(u8) tmp&0xFF);
-	if(zone == 4) {
-		// apply for all zones on keyboard
-		ret = casper_set_all_keyboard(
-			(u8) (tmp>>(8*3))&0xFF,
-			(u8) (tmp>>(8*2))&0xFF,
-			(u8) (tmp>>8)&0xFF,
-			(u8) tmp&0xFF
-		);
-		if(ret != 0) {
-			dev_err(dev, "ACPI status: %d\n", ret);
-			return ret;
-		}
+	ret = casper_set_backlight(
+		led_zone,
+		(u32) (tmp&0xFFFFFFFF)
+	);
+	if(ret != 0) {
+		dev_err(dev, "casper-wmi ACPI status: %d\n", ret);
+		return ret;
+	}
+	if(led_zone == CASPER_CORNER_LEDS){
+		casper_led_data[3] = (u32) (tmp&0xFFFFFFFF);
+	}else if(led_zone == CASPER_ALL_KEYBOARD_LEDS) {
+		casper_led_data[0] = (u32) (tmp&0xFFFFFFFF);
+		casper_led_data[1] = (u32) (tmp&0xFFFFFFFF);
+		casper_led_data[2] = (u32) (tmp&0xFFFFFFFF);
 	}else {
-		casper_wmi_data[zone].a = (u8) tmp&0xFF;
-		casper_wmi_data[zone].r = (u8) (tmp>>(8*3))&0xFF;
-		casper_wmi_data[zone].g = (u8) (tmp>>(8*2))&0xFF;
-		casper_wmi_data[zone].b = (u8) (tmp>>8)&0xFF;
-		ret = casper_set_single_zone(zone);
-		if(ret != 0) {
-			dev_err(dev, "ACPI status: %d\n", ret);
-			return ret;
-		}
-	}	
-	
+		casper_led_data[led_zone - CASPER_KEYBOARD_LED_1] =
+							(u32) (tmp&0xFFFFFFFF);
+	}
 	return count;
 }
 
-static DEVICE_ATTR_RW(zone_colors);
+static DEVICE_ATTR_RW(led_control);
 
 static struct attribute *casper_kbd_led_attrs[] = {
-	&dev_attr_zone_colors.attr,
+	&dev_attr_led_control.attr,
 	NULL,
 };
 
 ATTRIBUTE_GROUPS(casper_kbd_led);
 
+/*
+ * Sets brightness of all leds.
+ * */
 void set_casper_backlight_brightness(struct led_classdev *led_cdev,
 					  enum led_brightness brightness)
 {
-	casper_wmi_data[0].a = (casper_wmi_data[0].a&0xF0) | (u8)brightness;
-	casper_wmi_data[1].a = (casper_wmi_data[1].a&0xF0) | (u8)brightness;
-	casper_wmi_data[2].a = (casper_wmi_data[2].a&0xF0) | (u8)brightness;
-	casper_wmi_data[3].a = (casper_wmi_data[3].a&0xF0) | (u8)brightness;
+	casper_led_data[0] = (casper_led_data[0] & 0xF0FFFFFF) 
+		| ((u32) brightness)<<24;
+	casper_led_data[1] = (casper_led_data[1] & 0xF0FFFFFF) 
+		| ((u32) brightness)<<24;
+	casper_led_data[2] = (casper_led_data[2] & 0xF0FFFFFF) 
+		| ((u32) brightness)<<24;
 	
-	acpi_status ret = casper_set_single_zone(0);
+	// Setting any of the keyboard leds' brightness sets brightness of all
+	acpi_status ret = casper_set_backlight(
+		CASPER_KEYBOARD_LED_1,
+		casper_led_data[0]
+	);
+	
+	if(ret != 0) {
+		dev_err(led_cdev->dev, "Couldn't set brightness acpi status: %d\n", ret);
+		return;
+	}
+	
+	casper_led_data[3] = (casper_led_data[3] & 0xF0FFFFFF) | ((u32) brightness)<<24;
+	ret = casper_set_backlight(
+		CASPER_CORNER_LEDS,
+		casper_led_data[3]
+	);
 	if(ret != 0)
 		dev_err(led_cdev->dev, "Couldn't set brightness acpi status: %d\n", ret);
-	
-	ret = casper_set_single_zone(1);
-	if(ret != 0)
-		dev_err(led_cdev->dev, "casper_perform_wmi returned non zero value\n");
 }
 
+// Corner leds' brightness can be different from keyboard leds' but this is discarded.
 enum led_brightness get_casper_backlight_brightness(
 				struct led_classdev *led_cdev)
 {
-	u8 brightness = casper_wmi_data[3].a&0x0F;
-	if(brightness == 0)
-		return 0;
-	else if(brightness == 1)
-		return 1;
-	else
-		return 2;
+	return casper_led_data[0]&0x0F000000;
 }
 
 static struct led_classdev casper_kbd_led = {
@@ -175,10 +166,6 @@ static int __init casper_led_init(void)
 {
 	if (!wmi_has_guid(CASPER_EXCALIBUR_WMI_GUID))
 		return -ENODEV;
-	// Set all keyboard zones to zero and off because 
-	if(casper_send_zones() != 0) {
-		dev_err(NULL, "casper_perform_wmi returned non zero value\n");
-	}
 	return led_classdev_register(NULL, &casper_kbd_led);
 }
 
@@ -189,7 +176,3 @@ static void __exit casper_led_exit(void)
 
 module_init(casper_led_init); 
 module_exit(casper_led_exit);
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Mustafa Ekşi");
-MODULE_DESCRIPTION("Casper Excalibur Laptops' keyboard backlight driver");
