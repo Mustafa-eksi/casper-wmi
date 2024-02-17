@@ -55,7 +55,8 @@ u32 casper_led_data[4] = {0};
 /*
  * Function to set led value of specified zone, zone id should be between 3 and 7.
  * */
-static acpi_status casper_set_backlight(u8 zone_id, u32 data) {
+static acpi_status casper_set(u16 a1, u8 zone_id, u32 data)
+{
 	struct casper_wmi_args wmi_args = {0};
 	wmi_args.a0 = CASPER_WRITE;
 	wmi_args.a1 = CASPER_LEDCTRL;
@@ -101,7 +102,8 @@ static ssize_t led_control_store(struct device *dev, struct device_attribute
 		dev_err(dev, "led_control_store: this led zone doesn't exist\n");
 		return -1;
 	}
-	ret = casper_set_backlight(
+	ret = casper_set(
+		CASPER_LEDCTRL,
 		led_zone,
 		(u32) (tmp&0xFFFFFFFF)
 	);
@@ -145,7 +147,8 @@ void set_casper_backlight_brightness(struct led_classdev *led_cdev,
 		| ((u32) brightness)<<24;
 	
 	// Setting any of the keyboard leds' brightness sets brightness of all
-	acpi_status ret = casper_set_backlight(
+	acpi_status ret = casper_set(
+		CASPER_LEDCTRL,
 		CASPER_KEYBOARD_LED_1,
 		casper_led_data[0]
 	);
@@ -156,7 +159,8 @@ void set_casper_backlight_brightness(struct led_classdev *led_cdev,
 	}
 	
 	casper_led_data[3] = (casper_led_data[3] & 0xF0FFFFFF) | ((u32) brightness)<<24;
-	ret = casper_set_backlight(
+	ret = casper_set(
+		CASPER_LEDCTRL,
 		CASPER_CORNER_LEDS,
 		casper_led_data[3]
 	);
@@ -182,10 +186,19 @@ static struct led_classdev casper_kbd_led = {
 
 // HWMON PART v
 
-static u32 casper_get_fan_speed(struct wmi_device *wdev) {
+enum casper_power_plan {
+	HIGH_POWER = 1,
+	GAMING = 2,
+	TEXT_MODE = 3,
+	LOW_POWER = 4
+};
+
+static acpi_status casper_query(struct wmi_device *wdev, u16 a1,
+				      struct casper_wmi_args *out)
+{
 	struct casper_wmi_args wmi_args = {0};
 	wmi_args.a0 = CASPER_READ;
-	wmi_args.a1 = CASPER_HARDWAREINFO;
+	wmi_args.a1 = a1;
 	
 	struct acpi_buffer input = {
 		(acpi_size)sizeof(struct casper_wmi_args), 
@@ -193,61 +206,86 @@ static u32 casper_get_fan_speed(struct wmi_device *wdev) {
 	};
 	acpi_status ret = wmi_set_block(CASPER_WMI_GUID, 0, &input);
 	if(ACPI_FAILURE(ret)) {
-		dev_err(&wdev->dev, "Could not query (s) hardware information, acpi status: %u",
+		dev_err(&wdev->dev, "Could not query (set phase), acpi status: %u",
 			ret);
-		return 0;
+		return ret;
 	}
 	
 	union acpi_object *obj = wmidev_block_query(wdev, 0);
 	if(obj == NULL) {
-		dev_err(&wdev->dev, "Could not query (q) hardware information");
-		return 0;
+		dev_err(&wdev->dev, "Could not query (query) hardware information");
+		return AE_ERROR;
 	}
-	
 	if(obj->type != ACPI_TYPE_BUFFER) {
-		dev_err(&wdev->dev, "Return type is not buffer");
-		return 0;
+		dev_err(&wdev->dev, "Return type is not a buffer");
+		return AE_TYPE;
 	}
 	
 	if(obj->buffer.length != 32) {
 		dev_err(&wdev->dev, "Return buffer is not long enough");
-		return 0;
+		return AE_ERROR;
 	}
-	struct casper_wmi_args out = {0};
-	memcpy(&out, obj->buffer.pointer, 32);
-	//obj->buffer.pointer;
-	u16 cpu_fanspeed = (u16) out.a4;
-	cpu_fanspeed *= (u16) 256;
-	cpu_fanspeed += (u16) (out.a4 >> 8);
-	
-	u16 gpu_fanspeed = (u16) out.a5;
-	gpu_fanspeed *= (u16) 256;
-	gpu_fanspeed += (u16) (out.a5 >> 8);
-	
+	memcpy(out, obj->buffer.pointer, 32);
 	kfree(obj);
-	//kfree(input.pointer);
-	//return 1;
-	return ((u32)cpu_fanspeed) << 16 | ((u32)gpu_fanspeed);
+	return ret;
 }
 
-umode_t casper_wmi_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type,
-			      u32 attr, int channel){
-	return 4; //FIXME: look back at this later
+
+static umode_t casper_wmi_hwmon_is_visible(const void *drvdata, enum hwmon_sensor_types type,
+			      u32 attr, int channel)
+{
+	switch(type){
+	case hwmon_fan:
+		return 0444; // read only
+	case hwmon_pwm:
+		return 0644; // read and write
+	default:
+		return 0;
+	}
+	return 0;
 }
 
 int casper_wmi_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
-		    u32 attr, int channel, long *val) {
-	//printk("CASPER_WMI read: attr: %u channel: %d", attr, channel);
-	u32 fan_speeds = casper_get_fan_speed(to_wmi_device(dev->parent));
-	if(channel == 0)
-		*val = (long) fan_speeds >> 16; // CPU fan
-	else if(channel == 1)
-		*val = (long) fan_speeds & 0x0000FFFF;
+		    u32 attr, int channel, long *val)
+{
+	struct casper_wmi_args out = {0};
+	switch(type) {
+	case hwmon_fan:
+		acpi_status ret = casper_query(to_wmi_device(dev->parent), CASPER_HARDWAREINFO,
+					   &out);
+		if(ACPI_FAILURE(ret)) return ret;
+		if(channel == 0) { // CPU fan
+			u16 cpu_fanspeed = (u16) out.a4;
+			cpu_fanspeed *= (u16) 256;
+			cpu_fanspeed += (u16) (out.a4 >> 8);
+			*val = cpu_fanspeed;
+		}
+		else if(channel == 1) { // GPU fan
+			u16 gpu_fanspeed = (u16) out.a5;
+			gpu_fanspeed *= (u16) 256;
+			gpu_fanspeed += (u16) (out.a5 >> 8);
+			*val = gpu_fanspeed;
+		}
+		return 0;
+	case hwmon_pwm:
+		casper_query(to_wmi_device(dev->parent), CASPER_POWERPLAN,
+					   &out);
+		if(channel == 0) { // CPU fan
+			*val = (long) out.a2;
+		}else {
+			return -EOPNOTSUPP;
+		}
+		return 0;
+	default:
+		return -EOPNOTSUPP;
+	}
+	
 	return 0;
 }
 
 int casper_wmi_hwmon_read_string(struct device *dev, enum hwmon_sensor_types type,
-		    u32 attr, int channel, const char **str) {
+		    u32 attr, int channel, const char **str)
+{
 	if(channel == 0)
 		*str = "cpu_fan_speed";
 	else if(channel == 1)
@@ -257,16 +295,38 @@ int casper_wmi_hwmon_read_string(struct device *dev, enum hwmon_sensor_types typ
 	return 0;
 }
 
+int casper_wmi_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
+			   u32 attr, int channel, long val)
+{
+	acpi_status ret;
+	switch(type) {
+	case hwmon_pwm:
+		if(channel != 0)
+			return -EOPNOTSUPP;
+		ret = casper_set(CASPER_POWERPLAN, val, 0);
+		if(ACPI_FAILURE(ret)) {
+			dev_err(dev, "Couldn't set power plan, acpi_status: %d",
+				ret);
+			return -EINVAL;
+		}
+		return 0;
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+
 static struct hwmon_ops casper_wmi_hwmon_ops = {
 	.is_visible = &casper_wmi_hwmon_is_visible,
 	.read = &casper_wmi_hwmon_read,
-	.read_string = &casper_wmi_hwmon_read_string
+	.read_string = &casper_wmi_hwmon_read_string,
+	.write = &casper_wmi_hwmon_write
 };
 
 static const struct hwmon_channel_info * const casper_wmi_hwmon_info[] = {
 	HWMON_CHANNEL_INFO(fan,
-			   HWMON_F_INPUT,
-			   HWMON_F_INPUT),
+			   HWMON_F_INPUT | HWMON_F_LABEL,
+			   HWMON_F_INPUT | HWMON_F_LABEL),
+	HWMON_CHANNEL_INFO(pwm, HWMON_PWM_ENABLE),
 	NULL
 };
 
@@ -293,7 +353,8 @@ static int casper_wmi_probe(struct wmi_device *wdev, const void *context)
 	return PTR_ERR_OR_ZERO(hwmon_dev);
 }
 
-void casper_wmi_remove(struct wmi_device *wdev) {
+void casper_wmi_remove(struct wmi_device *wdev)
+{
 	led_classdev_unregister(&casper_kbd_led);
 }
 
