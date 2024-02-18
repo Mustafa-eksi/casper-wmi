@@ -10,11 +10,6 @@
 #include <linux/types.h>
 #include <linux/mod_devicetable.h>
 
-
-#ifndef to_wmi_device
-#define to_wmi_device(device)	container_of(device, struct wmi_device, dev)
-#endif
-
 MODULE_AUTHOR("Mustafa Ekşi <mustafa.eskieksi@gmail.com>");
 MODULE_DESCRIPTION("Casper Excalibur Laptop WMI driver");
 MODULE_LICENSE("GPL");
@@ -38,8 +33,12 @@ MODULE_LICENSE("GPL");
 #define CASPER_SETWINKEY 0x0200       // ??
 
 // this is read and write
-#define CASPER_POWERPLAN 0x0300           // ??
+#define CASPER_POWERPLAN 0x0300           // hwmon
 
+// I don't know why but I can't use some of new api in wmi.h but this works.
+#ifndef to_wmi_device
+#define to_wmi_device(device)	container_of(device, struct wmi_device, dev)
+#endif
 
 struct casper_wmi_args {
 	u16 a0, a1;
@@ -59,7 +58,7 @@ static acpi_status casper_set(u16 a1, u8 zone_id, u32 data)
 {
 	struct casper_wmi_args wmi_args = {0};
 	wmi_args.a0 = CASPER_WRITE;
-	wmi_args.a1 = CASPER_LEDCTRL;
+	wmi_args.a1 = a1;
 	wmi_args.a2 = zone_id;
 	wmi_args.a3 = data;
 	
@@ -303,7 +302,16 @@ int casper_wmi_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 	case hwmon_pwm:
 		if(channel != 0)
 			return -EOPNOTSUPP;
+		/*
+		 * 0 is also a valid power plan but Casper's Windows driver 
+		 * doesn't support it (probably) because of stability issues.
+		 * So we don't support it either.
+		 */
+		if(val < 1 || val > 4) {
+			return -EINVAL;
+		}
 		ret = casper_set(CASPER_POWERPLAN, val, 0);
+		printk("Writing started: %ld", val);
 		if(ACPI_FAILURE(ret)) {
 			dev_err(dev, "Couldn't set power plan, acpi_status: %d",
 				ret);
@@ -326,7 +334,7 @@ static const struct hwmon_channel_info * const casper_wmi_hwmon_info[] = {
 	HWMON_CHANNEL_INFO(fan,
 			   HWMON_F_INPUT | HWMON_F_LABEL,
 			   HWMON_F_INPUT | HWMON_F_LABEL),
-	HWMON_CHANNEL_INFO(pwm, HWMON_PWM_ENABLE),
+	HWMON_CHANNEL_INFO(pwm, HWMON_PWM_MODE),
 	NULL
 };
 
@@ -340,9 +348,9 @@ static int casper_wmi_probe(struct wmi_device *wdev, const void *context)
 {
 	struct device *hwmon_dev;
 	
+	// I couldn't find (with grep) any other driver with this guid
 	if (!wmi_has_guid(CASPER_WMI_GUID))
 		return -ENODEV;
-	// Check if it is the correct device
 
 	hwmon_dev = devm_hwmon_device_register_with_info(&wdev->dev, "casper_wmi", wdev,
 							 &casper_wmi_hwmon_chip_info, NULL);
@@ -360,7 +368,7 @@ void casper_wmi_remove(struct wmi_device *wdev)
 
 static const struct wmi_device_id casper_wmi_id_table[] = {
 	{ CASPER_WMI_GUID, NULL },
-	{ } // FIXME: why this is there?
+	{ }
 };
 
 static struct wmi_driver casper_wmi_driver = {
