@@ -41,7 +41,7 @@ struct casper_wmi_args {
 };
 
 static u32 last_keyboard_led_change;
-static u8 last_keyboard_led_zone;
+static u32 last_keyboard_led_zone;
 static bool *casper_raw_fanspeed;
 
 static int dmi_matched(const struct dmi_system_id *dmi)
@@ -98,7 +98,7 @@ static const struct dmi_system_id casper_dmi_list[] = {
 /*
  * Function to set led value of specified zone, zone id should be between 3 and 7.
  * */
-static acpi_status casper_set(u16 a1, u8 zone_id, u32 data)
+static acpi_status casper_set(u16 a1, u32 zone_id, u32 data)
 {
 	struct casper_wmi_args wmi_args = { 0 };
 	wmi_args.a0 = CASPER_WRITE;
@@ -132,12 +132,8 @@ static ssize_t led_control_store(struct device *dev, struct device_attribute
 	if (ret)
 		return ret;
 
-	u8 led_zone = (tmp >> (8 * 4)) & 0xFF;
-	if (CASPER_KEYBOARD_LED_1 > led_zone || led_zone > CASPER_CORNER_LEDS) {
-		dev_err(dev,
-			"led_control_store: this led zone doesn't exist\n");
-		return -AE_BAD_DATA;
-	}
+	u32 led_zone = (tmp >> (8 * 4));
+	
 	ret = casper_set(CASPER_SET_LED, led_zone, (u32) (tmp & 0xFFFFFFFF)
 	    );
 	if (ACPI_FAILURE(ret)) {
